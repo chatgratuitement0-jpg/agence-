@@ -1,0 +1,24 @@
+{
+  "name": "ai-agency-crm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "for f in js/*.js server/**/*.js server/*.js; do node --check \"$f\" || exit 1; done",
+    "server": "START_SERVER=true node server/index.js",
+    "test:phase8": "node tests/phase8.test.js",
+    "test:phase9": "node tests/phase9.test.js",
+    "test:phase10": "node tests/phase10.test.js",
+    "test": "npm run test:phase8 && npm run test:phase9 && npm run test:phase10 && npm run test:phase11",
+    "test:phase11": "node tests/phase11.test.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0"
+  }
+}

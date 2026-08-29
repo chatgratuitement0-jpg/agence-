@@ -1,0 +1,5 @@
+import {escapeHtml,qs} from './utils.js';
+export function toast(message,type='info'){const host=qs('#toast-host')||document.body;const el=document.createElement('div');el.className=`toast toast-${type}`;el.textContent=message;host.append(el);setTimeout(()=>el.remove(),3500);}
+export const loading=label=>`<div class="state state-loading"><span class="spinner"></span><span>${escapeHtml(label||'Loading…')}</span></div>`;
+export const emptyState=(title='Nothing here yet',text='Connect your data in a later phase.')=>`<div class="state"><div class="state-icon">○</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p></div>`;
+export function modal({title,body,actions=''}){const el=document.createElement('div');el.className='modal-backdrop';el.innerHTML=`<section class="modal" role="dialog" aria-modal="true"><header><h2>${escapeHtml(title)}</h2><button class="icon-btn" data-close>×</button></header><div class="modal-body">${body}</div><footer>${actions}</footer></section>`;document.body.append(el);el.addEventListener('click',e=>{if(e.target===el||e.target.closest('[data-close]'))el.remove()});return el;}
