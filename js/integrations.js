@@ -1,5 +1,6 @@
 import {supabaseClient} from './db.js';
 import {getCurrentProfile,getCurrentUser} from './auth.js';
+import {providerHealth,testProvider} from './server-api.js';
 import {qs,qsa,escapeHtml} from './utils.js';
 import {loading,emptyState,toast,modal} from './ui.js';
 const db=()=>supabaseClient();
