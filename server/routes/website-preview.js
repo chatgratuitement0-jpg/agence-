@@ -1,4 +1,4 @@
-import { generateWebsitePreview, getWebsitePreview } from '../core/website-generator.js';
+import { generateWebsitePreview, getWebsitePreview, reviewWebsitePreview } from '../core/website-generator.js';
 import { requireRole } from '../core/db.js';
 
 export async function handleWebsitePreview({ path, method, body, user, url, res }) {
@@ -10,6 +10,18 @@ export async function handleWebsitePreview({ path, method, body, user, url, res 
       return { status: 200, body: result };
     } catch (e) {
       return { status: e.status || 502, body: { error: e.message, code: e.code || 'WEBSITE_GENERATION_ERROR' } };
+    }
+  }
+
+  if (path === '/api/website/preview/review' && method === 'POST') {
+    if (!body?.projectId || !body?.token || !body?.decision) return { status: 400, body: { error: 'projectId, token and decision are required' } };
+    try {
+      const result = await reviewWebsitePreview({ projectId: body.projectId, token: body.token, decision: body.decision, message: body.message });
+      return { status: 200, body: result };
+    } catch (e) {
+      const message = e.message || 'Preview review failed';
+      const status = /token|expired|not found/i.test(message) ? 404 : 400;
+      return { status, body: { error: message, code: 'PREVIEW_REVIEW_ERROR' } };
     }
   }
 
