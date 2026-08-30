@@ -5,7 +5,12 @@ const ai = new OpenAIProvider();
 
 export async function createOutreachDraft({ candidateId, userId, channel = 'whatsapp' }) {
   const db = getAdminDb();
-  const { data: candidate, error } = await db.from('prospect_candidates').select('*').eq('id', candidateId).single();
+  const { data: candidate, error } = await db
+    .from('prospect_candidates')
+    .select('*, prospecting_searches!inner(created_by)')
+    .eq('id', candidateId)
+    .eq('prospecting_searches.created_by', userId)
+    .single();
   if (error || !candidate) throw new Error('Prospect candidate not found');
 
   const analysis = candidate.analysis || {};
@@ -20,7 +25,14 @@ export async function createOutreachDraft({ candidateId, userId, channel = 'what
     maxTokens: 500
   });
 
-  const draft = result?.content ? JSON.parse(result.content) : {};
+  const raw = result?.text ?? result?.content ?? '';
+  let draft;
+  try {
+    draft = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error('AI returned invalid outreach JSON');
+  }
+
   const leadId = candidate.lead_id;
   if (!leadId) throw new Error('Candidate must be linked to a lead before outreach drafting');
 
