@@ -1,10 +1,11 @@
 import {getAdminDb,requireRole} from '../core/db.js';
 import {createProviders} from '../providers/index.js';
 import {integrationLimiters} from '../core/rate-limit.js';
+import {generateWebsitePreview,getWebsitePreview} from '../core/website-generator.js';
+import {approveWebsitePreview,registerFirstPayment,downloadFinalWebsitePackage} from '../core/website-delivery.js';
 
 const providers=createProviders();
 const ACTIONS=new Set(['reply','qualify_lead','create_followup','recommend_service','request_human','create_activity','do_nothing']);
-const VARS=new Set(['company_name','contact_name','city','service','website','preview_url']);
 async function logUsage(db,entry){try{await db.from('ai_usage_logs').insert(entry)}catch(e){console.error('ai usage log failed',e.message)}}
 function estimatedCost(model,input=0,output=0){const rates={'gpt-5.6-luna':[0.20,1.20],'gpt-5.6-terra':[2,12],'gpt-5.6-sol':[4,20]};const r=rates[model]||null;return r?((input/1e6)*r[0]+(output/1e6)*r[1]):null}
 async function aiAnalyze({user,body}){
@@ -33,4 +34,15 @@ async function aiDraft({user,body}){
   await db.from('notifications').insert({user_id:user.id,type:'ai_draft_ready',title:'AI draft ready',message:'A new AI response draft is waiting for approval.',lead_id:lead?.id||null,source_type:'ai_draft',source_id:draft.data.id});
   return {status:200,body:{draft:draft.data,fallback:false}};
 }
-export async function handleApi({path,req,body,user}){try{if(path==='/api/ai/analyze'&&req.method==='POST')return await aiAnalyze({user,body});if(path==='/api/ai/draft'&&req.method==='POST')return await aiDraft({user,body});if(path==='/api/providers/health'&&req.method==='GET'){requireRole(user,['admin','manager']);return {status:200,body:{ai:await providers.ai.health({test:false}),whatsapp:await providers.whatsapp.health(),sms:await providers.sms.health()}}}if(path==='/api/providers/test'&&req.method==='POST'){requireRole(user,['admin','manager']);const kind=body.provider;if(!['ai','whatsapp'].includes(kind))return {status:400,body:{error:'Only AI and WhatsApp connection tests are implemented.'}};const result=kind==='ai'?await providers.ai.health({test:true}):await providers.whatsapp.health({test:true});const db=getAdminDb();await db.from('provider_connection_tests').insert({provider:result.provider,status:result.status==='connected'?'success':result.status==='not_configured'?'not_configured':'failed',error_code:result.error_code||null,safe_error_message:result.error_code||null,created_by:user.id});return {status:result.status==='error'?502:200,body:result}}return {status:404,body:{error:'Not found'}}}catch(e){return {status:e.status||500,body:{error:e.status===401?'Unauthorized':'Integration operation failed.'}}}}
+
+export async function handleApi({path,req,body,user}){try{
+  if(path==='/api/ai/analyze'&&req.method==='POST')return await aiAnalyze({user,body});
+  if(path==='/api/ai/draft'&&req.method==='POST')return await aiDraft({user,body});
+  if(path==='/api/website/preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await generateWebsitePreview({projectId:body.projectId,userId:user.id})};}
+  if(path==='/api/website/approve-preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await approveWebsitePreview({projectId:body.projectId,userId:user.id})};}
+  if(path==='/api/website/register-first-payment'&&req.method==='POST'){requireRole(user);return {status:200,body:await registerFirstPayment({projectId:body.projectId,paymentId:body.paymentId,userId:user.id})};}
+  if(path==='/api/website/generate-package'&&req.method==='POST'){requireRole(user);const result=await downloadFinalWebsitePackage({projectId:body.projectId,userId:user.id});return {status:200,body:{project:result.project,filename:result.filename,size:result.zip.length,sha256:result.sha256,download_url:result.project.package_path}};}
+  if(path==='/api/providers/health'&&req.method==='GET'){requireRole(user,['admin','manager']);return {status:200,body:{ai:await providers.ai.health({test:false}),whatsapp:await providers.whatsapp.health(),sms:await providers.sms.health()}}}
+  if(path==='/api/providers/test'&&req.method==='POST'){requireRole(user,['admin','manager']);const kind=body.provider;if(!['ai','whatsapp'].includes(kind))return {status:400,body:{error:'Only AI and WhatsApp connection tests are implemented.'}};const result=kind==='ai'?await providers.ai.health({test:true}):await providers.whatsapp.health({test:true});const db=getAdminDb();await db.from('provider_connection_tests').insert({provider:result.provider,status:result.status==='connected'?'success':result.status==='not_configured'?'not_configured':'failed',error_code:result.error_code||null,safe_error_message:result.error_code||null,created_by:user.id});return {status:result.status==='error'?502:200,body:result}}
+  return {status:404,body:{error:'Not found'}}
+}catch(e){return {status:e.status||500,body:{error:e.status===401?'Unauthorized':e.message||'Integration operation failed.'}}}}
