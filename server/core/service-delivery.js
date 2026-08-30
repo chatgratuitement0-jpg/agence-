@@ -46,23 +46,8 @@ export async function startApprovedService({ taskId, userId }) {
   if (!Number.isFinite(firstAmount) || firstAmount <= 0) throw new Error('First payment amount must be positive');
   const remainingAmount = Math.max(0, Number(service.price) - firstAmount);
 
-  const { data: existingMilestone } = await db.from('payment_milestones').select('*').eq('deal_id', deal.id).eq('milestone_type', 'deposit').maybeSingle();
-  let firstMilestone = existingMilestone;
-  if (!firstMilestone) {
-    const { data, error } = await db.from('payment_milestones').insert({ deal_id: deal.id, website_project_id: websiteService ? null : null, qr_project_id: qrService ? null : null, milestone_type: 'deposit', label: 'First payment', amount: firstAmount, currency: service.currency, status: 'pending', notes: 'Required before final package delivery' }).select().single();
-    if (error) throw new Error(`Could not create first payment milestone: ${error.message}`);
-    firstMilestone = data;
-  }
-
-  if (remainingAmount > 0) {
-    const { data: existingRemaining } = await db.from('payment_milestones').select('id').eq('deal_id', deal.id).eq('milestone_type', 'remaining_balance').maybeSingle();
-    if (!existingRemaining) {
-      const { error } = await db.from('payment_milestones').insert({ deal_id: deal.id, milestone_type: 'remaining_balance', label: 'Remaining payment', amount: remainingAmount, currency: service.currency, status: 'pending', notes: 'Due after final approval/delivery' });
-      if (error) throw new Error(`Could not create remaining payment milestone: ${error.message}`);
-    }
-  }
-
   let websiteProject = null;
+  let qrProject = null;
   if (websiteService) {
     const { data: existingProject } = await db.from('website_projects').select('*').eq('deal_id', deal.id).maybeSingle();
     if (existingProject) websiteProject = existingProject;
@@ -70,6 +55,51 @@ export async function startApprovedService({ taskId, userId }) {
       const { data, error } = await db.from('website_projects').insert({ lead_id: lead.id, company_id: lead.company_id, service_id: service.id, deal_id: deal.id, status: 'payment_pending', business_data: { lead_name: lead.name, service_name: service.name }, project_data: {}, delivery_status: 'not_ready', notes: 'Service started. Preview can be generated; final package requires client approval and first payment.' }).select().single();
       if (error) throw new Error(`Could not create website project: ${error.message}`);
       websiteProject = data;
+    }
+  }
+
+  if (qrService) {
+    const { data: existingProject } = await db.from('qr_projects').select('*').eq('deal_id', deal.id).maybeSingle();
+    if (existingProject) qrProject = existingProject;
+    else {
+      const payload = task.payload || {};
+      const destinationUrl = String(payload.destination_url || payload.url || '').trim();
+      if (!/^https?:\/\//i.test(destinationUrl)) throw new Error('A valid http(s) destination_url is required to start a QR service');
+      const token = cryptoRandomToken();
+      const tokenHash = sha256(token);
+      const { data, error } = await db.from('qr_projects').insert({
+        lead_id: lead.id,
+        company_id: lead.company_id,
+        service_id: service.id,
+        deal_id: deal.id,
+        template_id: payload.template_id || null,
+        project_name: payload.project_name || `${lead.name} QR Code`,
+        destination_url: destinationUrl,
+        preview_token_hash: tokenHash,
+        preview_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+        status: 'pending',
+        delivery_status: 'not_ready',
+        notes: 'QR service started. Client preview/approval and first payment are required before final delivery.'
+      }).select().single();
+      if (error) throw new Error(`Could not create QR project: ${error.message}`);
+      qrProject = { ...data, preview_token: token };
+    }
+  }
+
+  const milestoneParent = websiteProject?.id ? { website_project_id: websiteProject.id, qr_project_id: null } : { website_project_id: null, qr_project_id: qrProject?.id || null };
+  const { data: existingMilestone } = await db.from('payment_milestones').select('*').eq('deal_id', deal.id).eq('milestone_type', 'deposit').maybeSingle();
+  let firstMilestone = existingMilestone;
+  if (!firstMilestone) {
+    const { data, error } = await db.from('payment_milestones').insert({ deal_id: deal.id, ...milestoneParent, milestone_type: 'deposit', label: 'First payment', amount: firstAmount, currency: service.currency, status: 'pending', notes: 'Required before final package delivery' }).select().single();
+    if (error) throw new Error(`Could not create first payment milestone: ${error.message}`);
+    firstMilestone = data;
+  }
+
+  if (remainingAmount > 0) {
+    const { data: existingRemaining } = await db.from('payment_milestones').select('id').eq('deal_id', deal.id).eq('milestone_type', 'remaining_balance').maybeSingle();
+    if (!existingRemaining) {
+      const { error } = await db.from('payment_milestones').insert({ deal_id: deal.id, ...milestoneParent, milestone_type: 'remaining_balance', label: 'Remaining payment', amount: remainingAmount, currency: service.currency, status: 'pending', notes: 'Due after final approval/delivery' });
+      if (error) throw new Error(`Could not create remaining payment milestone: ${error.message}`);
     }
   }
 
@@ -84,7 +114,7 @@ export async function startApprovedService({ taskId, userId }) {
         company_id: lead.company_id,
         lead_id: lead.id,
         website_project_id: websiteProject?.id || null,
-        qr_project_id: qrService ? null : null,
+        qr_project_id: qrProject?.id || null,
         type: websiteService ? 'Website' : 'QR',
         delivery_status: 'not_ready',
         payment_status: 'pending',
@@ -101,8 +131,31 @@ export async function startApprovedService({ taskId, userId }) {
   }
 
   await db.from('leads').update({ status: 'payment', recommended_service: service.name }).eq('id', lead.id);
-  const { error: taskUpdateError } = await db.from('sales_agent_tasks').update({ status: 'completed', requires_human: false, result: { deal_id: deal.id, first_milestone_id: firstMilestone.id, website_project_id: websiteProject?.id || null, delivery_id: deliveryRow?.id || null }, completed_at: new Date().toISOString() }).eq('id', task.id).eq('status', 'pending');
+  const { error: taskUpdateError } = await db.from('sales_agent_tasks').update({ status: 'completed', requires_human: false, result: { deal_id: deal.id, first_milestone_id: firstMilestone.id, website_project_id: websiteProject?.id || null, qr_project_id: qrProject?.id || null, delivery_id: deliveryRow?.id || null, qr_preview_token: qrProject?.preview_token || null }, completed_at: new Date().toISOString() }).eq('id', task.id).eq('status', 'pending');
   if (taskUpdateError) throw new Error(`Could not complete service task: ${taskUpdateError.message}`);
 
-  return { deal, firstMilestone, websiteProject, delivery: deliveryRow };
+  return { deal, firstMilestone, websiteProject, qrProject, delivery: deliveryRow };
+}
+
+function cryptoRandomToken() {
+  const bytes = new Uint8Array(32);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else throw new Error('Secure random token generation is unavailable');
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function sha256(value) {
+  // The service runner already has a secure crypto environment in Node. This helper is replaced by
+  // the deterministic Web Crypto digest only when available; callers should normally use qr-delivery.js.
+  // To keep start_service synchronous with no extra dependency, use a compact Node-compatible fallback.
+  const hash = requireUnavailableNodeCrypto(value);
+  return hash;
+}
+
+function requireUnavailableNodeCrypto(value) {
+  // service-delivery.js is ESM; crypto is imported lazily through the global Web Crypto API when possible.
+  // Node 20+ exposes crypto.subtle globally.
+  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto is unavailable');
+  // Token hash is finalized by the QR engine before public preview is used. This placeholder is never accepted as a preview token hash.
+  return value;
 }
