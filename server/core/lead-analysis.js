@@ -7,8 +7,9 @@ export async function analyzeProspect({ candidateId, userId }) {
   const db = getAdminDb();
   const { data: candidate, error } = await db
     .from('prospect_candidates')
-    .select('*')
+    .select('*, prospecting_searches!inner(created_by)')
     .eq('id', candidateId)
+    .eq('prospecting_searches.created_by', userId)
     .single();
 
   if (error || !candidate) throw new Error('Prospect candidate not found');
@@ -24,13 +25,18 @@ export async function analyzeProspect({ candidateId, userId }) {
     maxTokens: 700
   });
 
-  const analysis = result?.content ? JSON.parse(result.content) : {};
-  const score = Number(analysis.fit_score);
-  const status = 'analyzed';
+  const raw = result?.text ?? result?.content ?? '';
+  let analysis;
+  try {
+    analysis = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error('AI returned invalid analysis JSON');
+  }
 
+  const score = Number(analysis.fit_score);
   const { data: updated, error: updateError } = await db
     .from('prospect_candidates')
-    .update({ analysis, score: Number.isFinite(score) ? score : candidate.score, status, updated_at: new Date().toISOString() })
+    .update({ analysis, score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : candidate.score, status: 'analyzed', updated_at: new Date().toISOString() })
     .eq('id', candidateId)
     .select()
     .single();
