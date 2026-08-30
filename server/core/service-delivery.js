@@ -13,7 +13,11 @@ export async function startApprovedService({ taskId, userId }) {
   const { data: task, error: taskError } = await db.from('sales_agent_tasks').select('*').eq('id', taskId).single();
   if (taskError || !task) throw new Error('Service task not found');
   if (task.task_type !== 'start_service') throw new Error('Task is not a service-start task');
-  if (task.status !== 'pending' || task.requires_human) throw new Error('Service task is not ready to start');
+  if (task.status !== 'pending' && task.status !== 'waiting_approval') throw new Error('Service task is not ready to start');
+  if (task.status === 'waiting_approval' && task.requires_human) {
+    const { error: approvalError } = await db.from('sales_agent_tasks').update({ status: 'pending', requires_human: false, result: { ...task.result, decision: 'approved', approved_by: userId, approved_at: new Date().toISOString() } }).eq('id', task.id).eq('status', 'waiting_approval');
+    if (approvalError) throw new Error(`Could not finalize service approval: ${approvalError.message}`);
+  }
 
   const { data: lead, error: leadError } = await db.from('leads').select('id,name,owner_id,company_id,recommended_service').eq('id', task.lead_id).single();
   if (leadError || !lead) throw new Error('Lead not found');
@@ -132,7 +136,7 @@ export async function startApprovedService({ taskId, userId }) {
   }
 
   await db.from('leads').update({ status: 'payment', recommended_service: service.name }).eq('id', lead.id);
-  const { error: taskUpdateError } = await db.from('sales_agent_tasks').update({ status: 'completed', requires_human: false, result: { deal_id: deal.id, first_milestone_id: firstMilestone.id, website_project_id: websiteProject?.id || null, qr_project_id: qrProject?.id || null, delivery_id: deliveryRow?.id || null, qr_preview_token: qrProject?.preview_token || null }, completed_at: new Date().toISOString() }).eq('id', task.id).eq('status', 'pending');
+  const { error: taskUpdateError } = await db.from('sales_agent_tasks').update({ status: 'completed', requires_human: false, result: { ...task.result, deal_id: deal.id, first_milestone_id: firstMilestone.id, website_project_id: websiteProject?.id || null, qr_project_id: qrProject?.id || null, delivery_id: deliveryRow?.id || null, qr_preview_token: qrProject?.preview_token || null }, completed_at: new Date().toISOString() }).eq('id', task.id).eq('status', 'pending');
   if (taskUpdateError) throw new Error(`Could not complete service task: ${taskUpdateError.message}`);
 
   return { deal, firstMilestone, websiteProject, qrProject, delivery: deliveryRow };
