@@ -30,7 +30,7 @@ export async function handleWebsitePreview({ path, method, body, user, url, res 
     requireRole(user);
     if (!body?.projectId) return { status: 400, body: { error: 'projectId is required' } };
     try {
-      const result = await generateFinalWebsitePackage({ projectId: body.projectId, userId: user.id });
+      const result = await generateFinalWebsitePackage({ projectId: body.projectId, userId: user.id, userRole: user.role });
       return {
         status: 200,
         body: {
@@ -54,7 +54,7 @@ export async function handleWebsitePreview({ path, method, body, user, url, res 
     requireRole(user);
     if (!body?.projectId) return { status: 400, body: { error: 'projectId is required' } };
     try {
-      const result = await downloadFinalWebsitePackage({ projectId: body.projectId, userId: user.id });
+      const result = await downloadFinalWebsitePackage({ projectId: body.projectId, userId: user.id, userRole: user.role });
       return {
         status: 200,
         body: {
