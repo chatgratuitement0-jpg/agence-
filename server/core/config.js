@@ -5,6 +5,7 @@ export const serverConfig = Object.freeze({
   supabaseServiceRoleKey: required('SUPABASE_SERVICE_ROLE_KEY'),
   openaiApiKey: required('OPENAI_API_KEY'),
   whatsappToken: required('WHATSAPP_TOKEN'),
+  googlePlacesApiKey: required('GOOGLE_PLACES_API_KEY'),
   smsProviderSecret: required('SMS_PROVIDER_SECRET'),
   webhookSecret: required('WEBHOOK_SECRET'),
   maxRetries: Math.max(0, Number(process.env.INTEGRATION_MAX_RETRIES || 3)),
