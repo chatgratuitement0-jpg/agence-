@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { getAdminDb } from './db.js';
 
 const WEBSITE_SERVICE_HINTS = ['website', 'site', 'web', 'website generation'];
@@ -65,8 +66,8 @@ export async function startApprovedService({ taskId, userId }) {
       const payload = task.payload || {};
       const destinationUrl = String(payload.destination_url || payload.url || '').trim();
       if (!/^https?:\/\//i.test(destinationUrl)) throw new Error('A valid http(s) destination_url is required to start a QR service');
-      const token = cryptoRandomToken();
-      const tokenHash = sha256(token);
+      const previewToken = crypto.randomBytes(32).toString('hex');
+      const previewTokenHash = crypto.createHash('sha256').update(previewToken).digest('hex');
       const { data, error } = await db.from('qr_projects').insert({
         lead_id: lead.id,
         company_id: lead.company_id,
@@ -75,14 +76,14 @@ export async function startApprovedService({ taskId, userId }) {
         template_id: payload.template_id || null,
         project_name: payload.project_name || `${lead.name} QR Code`,
         destination_url: destinationUrl,
-        preview_token_hash: tokenHash,
+        preview_token_hash: previewTokenHash,
         preview_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
         status: 'pending',
         delivery_status: 'not_ready',
         notes: 'QR service started. Client preview/approval and first payment are required before final delivery.'
       }).select().single();
       if (error) throw new Error(`Could not create QR project: ${error.message}`);
-      qrProject = { ...data, preview_token: token };
+      qrProject = { ...data, preview_token: previewToken };
     }
   }
 
@@ -135,27 +136,4 @@ export async function startApprovedService({ taskId, userId }) {
   if (taskUpdateError) throw new Error(`Could not complete service task: ${taskUpdateError.message}`);
 
   return { deal, firstMilestone, websiteProject, qrProject, delivery: deliveryRow };
-}
-
-function cryptoRandomToken() {
-  const bytes = new Uint8Array(32);
-  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
-  else throw new Error('Secure random token generation is unavailable');
-  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function sha256(value) {
-  // The service runner already has a secure crypto environment in Node. This helper is replaced by
-  // the deterministic Web Crypto digest only when available; callers should normally use qr-delivery.js.
-  // To keep start_service synchronous with no extra dependency, use a compact Node-compatible fallback.
-  const hash = requireUnavailableNodeCrypto(value);
-  return hash;
-}
-
-function requireUnavailableNodeCrypto(value) {
-  // service-delivery.js is ESM; crypto is imported lazily through the global Web Crypto API when possible.
-  // Node 20+ exposes crypto.subtle globally.
-  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto is unavailable');
-  // Token hash is finalized by the QR engine before public preview is used. This placeholder is never accepted as a preview token hash.
-  return value;
 }
