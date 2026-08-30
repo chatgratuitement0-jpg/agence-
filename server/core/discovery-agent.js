@@ -1,5 +1,6 @@
 import { getAdminDb, requireRole } from './db.js';
 import { GooglePlacesProvider } from '../providers/google-places.js';
+import { processDiscoveredProspects } from './prospecting-pipeline.js';
 
 const discovery = new GooglePlacesProvider();
 
@@ -50,6 +51,20 @@ export async function runDiscoverySearch({ searchId, userId }) {
     completed_at: new Date().toISOString(),
     metadata: { provider: 'google_places', count: candidates.length, nextPageToken: result.nextPageToken }
   }).eq('id', searchId);
+
+  // Continue automatically: discovery -> AI analysis -> qualification -> outreach queue.
+  try {
+    await processDiscoveredProspects({ searchId, userId });
+  } catch (pipelineError) {
+    await db.from('prospecting_searches').update({
+      metadata: {
+        provider: 'google_places',
+        count: candidates.length,
+        nextPageToken: result.nextPageToken,
+        pipelineError: pipelineError.message
+      }
+    }).eq('id', searchId);
+  }
 
   return { searchId, candidatesCount: candidates.length, candidates };
 }
