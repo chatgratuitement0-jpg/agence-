@@ -1,4 +1,5 @@
 import { getAdminDb, requireRole } from './db.js';
+import { runDiscoverySearch } from './discovery-agent.js';
 
 const TASK_TYPES = new Set(['analyze','draft_outreach','send_outreach','follow_up','negotiate','handoff','start_service','review_service']);
 const APPROVABLE = new Set(['send_outreach','start_service','review_service']);
@@ -12,7 +13,13 @@ export async function handleProspectingApi({ path, method, body, user }) {
     if (!query) return { status: 400, body: { error: 'query is required' } };
     const { data, error } = await db.from('prospecting_searches').insert({ created_by: user.id, query, target_city: body.target_city || null, target_industry: body.target_industry || null, status: 'pending', metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {} }).select().single();
     if (error) return { status: 500, body: { error: 'Could not create prospecting search' } };
-    return { status: 201, body: { search: data, provider_status: 'discovery_provider_required' } };
+
+    try {
+      const discovery = await runDiscoverySearch({ searchId: data.id, userId: user.id });
+      return { status: 201, body: { search: { ...data, status: 'completed' }, discovery } };
+    } catch (discoveryError) {
+      return { status: 202, body: { search: data, discovery: { status: 'failed', error: discoveryError.message } } };
+    }
   }
 
   if (path === '/api/prospecting/candidates' && method === 'POST') {
