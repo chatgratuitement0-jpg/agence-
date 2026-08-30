@@ -1,8 +1,9 @@
 import {getAdminDb,requireRole} from '../core/db.js';
 import {createProviders} from '../providers/index.js';
 import {integrationLimiters} from '../core/rate-limit.js';
-import {generateWebsitePreview,getWebsitePreview} from '../core/website-generator.js';
-import {approveWebsitePreview,registerFirstPayment,downloadFinalWebsitePackage} from '../core/website-delivery.js';
+import {generateWebsitePreview} from '../core/website-generator.js';
+import {approveWebsitePreview,registerFirstPayment,generateFinalWebsitePackage,downloadFinalWebsitePackage} from '../core/website-delivery.js';
+import {createQrProject,generateQrPreview,clientReviewQr,registerQrFirstPayment,generateFinalQrPackage,downloadFinalQrPackage} from '../core/qr-delivery.js';
 
 const providers=createProviders();
 const ACTIONS=new Set(['reply','qualify_lead','create_followup','recommend_service','request_human','create_activity','do_nothing']);
@@ -38,10 +39,20 @@ async function aiDraft({user,body}){
 export async function handleApi({path,req,body,user}){try{
   if(path==='/api/ai/analyze'&&req.method==='POST')return await aiAnalyze({user,body});
   if(path==='/api/ai/draft'&&req.method==='POST')return await aiDraft({user,body});
-  if(path==='/api/website/preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await generateWebsitePreview({projectId:body.projectId,userId:user.id})};}
-  if(path==='/api/website/approve-preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await approveWebsitePreview({projectId:body.projectId,userId:user.id})};}
-  if(path==='/api/website/register-first-payment'&&req.method==='POST'){requireRole(user);return {status:200,body:await registerFirstPayment({projectId:body.projectId,paymentId:body.paymentId,userId:user.id})};}
-  if(path==='/api/website/generate-package'&&req.method==='POST'){requireRole(user);const result=await downloadFinalWebsitePackage({projectId:body.projectId,userId:user.id});return {status:200,body:{project:result.project,filename:result.filename,size:result.zip.length,sha256:result.sha256,download_url:result.project.package_path}};}
+
+  if(path==='/api/website/preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await generateWebsitePreview({projectId:body.projectId,userId:user.id,userRole:user.role})};}
+  if(path==='/api/website/approve-preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await approveWebsitePreview({projectId:body.projectId,userId:user.id,userRole:user.role})};}
+  if(path==='/api/website/register-first-payment'&&req.method==='POST'){requireRole(user);return {status:200,body:await registerFirstPayment({projectId:body.projectId,paymentId:body.paymentId,userId:user.id,userRole:user.role})};}
+  if(path==='/api/website/generate-package'&&req.method==='POST'){requireRole(user);const result=await generateFinalWebsitePackage({projectId:body.projectId,userId:user.id,userRole:user.role});return {status:200,body:{project:result.project,filename:result.filename,size:result.size,sha256:result.sha256,download_url:result.delivery?.signed_url||null,reused:result.reused}};}
+  if(path==='/api/website/download-package'&&req.method==='POST'){requireRole(user);const result=await downloadFinalWebsitePackage({projectId:body.projectId,userId:user.id,userRole:user.role});return {status:200,body:{filename:result.filename,size:result.size,sha256:result.sha256,download_url:result.delivery?.signed_url||null}};}
+
+  if(path==='/api/qr/create'&&req.method==='POST'){requireRole(user);return {status:201,body:await createQrProject({leadId:body.leadId,companyId:body.companyId,serviceId:body.serviceId,dealId:body.dealId,templateId:body.templateId,destinationUrl:body.destinationUrl,projectName:body.projectName,userId:user.id,userRole:user.role})};}
+  if(path==='/api/qr/preview'&&req.method==='POST'){requireRole(user);return {status:200,body:await generateQrPreview({projectId:body.projectId,userId:user.id,userRole:user.role})};}
+  if(path==='/api/qr/review'&&req.method==='POST'){return {status:200,body:await clientReviewQr({token:body.token,action:body.action,message:body.message})};}
+  if(path==='/api/qr/register-first-payment'&&req.method==='POST'){requireRole(user);return {status:200,body:await registerQrFirstPayment({projectId:body.projectId,paymentId:body.paymentId,userId:user.id,userRole:user.role})};}
+  if(path==='/api/qr/generate-package'&&req.method==='POST'){requireRole(user);const result=await generateFinalQrPackage({projectId:body.projectId,userId:user.id,userRole:user.role});return {status:200,body:{project:result.project,filename:result.filename,size:result.size,sha256:result.sha256,download_url:result.delivery?.signed_url||null,reused:result.reused}};}
+  if(path==='/api/qr/download-package'&&req.method==='POST'){requireRole(user);const result=await downloadFinalQrPackage({projectId:body.projectId,userId:user.id,userRole:user.role});return {status:200,body:{filename:result.filename,size:result.size,sha256:result.sha256,download_url:result.delivery?.signed_url||null}};}
+
   if(path==='/api/providers/health'&&req.method==='GET'){requireRole(user,['admin','manager']);return {status:200,body:{ai:await providers.ai.health({test:false}),whatsapp:await providers.whatsapp.health(),sms:await providers.sms.health()}}}
   if(path==='/api/providers/test'&&req.method==='POST'){requireRole(user,['admin','manager']);const kind=body.provider;if(!['ai','whatsapp'].includes(kind))return {status:400,body:{error:'Only AI and WhatsApp connection tests are implemented.'}};const result=kind==='ai'?await providers.ai.health({test:true}):await providers.whatsapp.health({test:true});const db=getAdminDb();await db.from('provider_connection_tests').insert({provider:result.provider,status:result.status==='connected'?'success':result.status==='not_configured'?'not_configured':'failed',error_code:result.error_code||null,safe_error_message:result.error_code||null,created_by:user.id});return {status:result.status==='error'?502:200,body:result}}
   return {status:404,body:{error:'Not found'}}
