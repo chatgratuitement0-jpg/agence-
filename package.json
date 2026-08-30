@@ -16,7 +16,8 @@
     "test:phase11": "node tests/phase11.test.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.0"
+    "@supabase/supabase-js": "^2.57.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "vite": "^7.1.0"
