@@ -1,6 +1,7 @@
 import { getAdminDb } from './db.js';
 
 const BUCKET = process.env.DELIVERY_BUCKET || 'deliveries';
+const SIGNED_URL_TTL = 60 * 60 * 24;
 
 export async function uploadDeliveryPackage({ projectId, zipBuffer, fileName }) {
   const db = getAdminDb();
@@ -13,12 +14,19 @@ export async function uploadDeliveryPackage({ projectId, zipBuffer, fileName }) 
   });
   if (error) throw new Error(`Delivery upload failed: ${error.message}`);
 
-  const { data: signed, error: signedError } = await db.storage
+  return createDeliverySignedUrl({ path });
+}
+
+export async function createDeliverySignedUrl({ path }) {
+  if (!path) throw new Error('Delivery package path is required');
+  const db = getAdminDb();
+  const { data: signed, error } = await db.storage
     .from(BUCKET)
-    .createSignedUrl(path, 60 * 60 * 24);
-  if (signedError || !signed?.signedUrl) {
-    throw new Error(`Could not create delivery URL: ${signedError?.message || 'unknown error'}`);
+    .createSignedUrl(path, SIGNED_URL_TTL);
+
+  if (signed?.signedUrl) {
+    return { bucket: BUCKET, path, signed_url: signed.signedUrl, expires_in: SIGNED_URL_TTL };
   }
 
-  return { bucket: BUCKET, path, signed_url: signed.signedUrl, expires_in: 86400 };
+  throw new Error(`Could not create delivery URL: ${error?.message || 'unknown error'}`);
 }
