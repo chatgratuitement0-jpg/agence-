@@ -8,7 +8,7 @@ function serviceText(service) { return `${service?.name || ''} ${service?.descri
 function looksLikeWebsiteService(service) { return WEBSITE_SERVICE_HINTS.some(hint => serviceText(service).includes(hint)); }
 function looksLikeQrService(service) { return QR_SERVICE_HINTS.some(hint => serviceText(service).includes(hint)); }
 
-export async function startApprovedService({ taskId, userId }) {
+export async function startApprovedService({ taskId, userId, userRole = 'sales' }) {
   const db = getAdminDb();
   const { data: task, error: taskError } = await db.from('sales_agent_tasks').select('*').eq('id', taskId).single();
   if (taskError || !task) throw new Error('Service task not found');
@@ -21,7 +21,7 @@ export async function startApprovedService({ taskId, userId }) {
 
   const { data: lead, error: leadError } = await db.from('leads').select('id,name,owner_id,company_id,recommended_service').eq('id', task.lead_id).single();
   if (leadError || !lead) throw new Error('Lead not found');
-  if (lead.owner_id !== userId) throw new Error('Not authorized');
+  if (!['admin', 'manager'].includes(userRole) && lead.owner_id !== userId) throw new Error('Not authorized');
 
   const requestedServiceId = task.payload?.service_id || null;
   let service = null;
@@ -72,20 +72,7 @@ export async function startApprovedService({ taskId, userId }) {
       if (!/^https?:\/\//i.test(destinationUrl)) throw new Error('A valid http(s) destination_url is required to start a QR service');
       const previewToken = crypto.randomBytes(32).toString('hex');
       const previewTokenHash = crypto.createHash('sha256').update(previewToken).digest('hex');
-      const { data, error } = await db.from('qr_projects').insert({
-        lead_id: lead.id,
-        company_id: lead.company_id,
-        service_id: service.id,
-        deal_id: deal.id,
-        template_id: payload.template_id || null,
-        project_name: payload.project_name || `${lead.name} QR Code`,
-        destination_url: destinationUrl,
-        preview_token_hash: previewTokenHash,
-        preview_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        status: 'pending',
-        delivery_status: 'not_ready',
-        notes: 'QR service started. Client preview/approval and first payment are required before final delivery.'
-      }).select().single();
+      const { data, error } = await db.from('qr_projects').insert({ lead_id: lead.id, company_id: lead.company_id, service_id: service.id, deal_id: deal.id, template_id: payload.template_id || null, project_name: payload.project_name || `${lead.name} QR Code`, destination_url: destinationUrl, preview_token_hash: previewTokenHash, preview_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), status: 'pending', delivery_status: 'not_ready', notes: 'QR service started. Client preview/approval and first payment are required before final delivery.' }).select().single();
       if (error) throw new Error(`Could not create QR project: ${error.message}`);
       qrProject = { ...data, preview_token: previewToken };
     }
@@ -114,21 +101,7 @@ export async function startApprovedService({ taskId, userId }) {
     if (deliveryError) throw new Error(`Could not read delivery: ${deliveryError.message}`);
     deliveryRow = delivery;
     if (!deliveryRow) {
-      const payload = {
-        deal_id: deal.id,
-        company_id: lead.company_id,
-        lead_id: lead.id,
-        website_project_id: websiteProject?.id || null,
-        qr_project_id: qrProject?.id || null,
-        type: websiteService ? 'Website' : 'QR',
-        delivery_status: 'not_ready',
-        payment_status: 'pending',
-        approval_status: 'pending',
-        production_status: websiteService ? 'awaiting_intake' : 'not_ready',
-        download_count: 0,
-        responsible_user_id: userId,
-        notes: `Service started. First payment: ${firstAmount} ${service.currency}.`
-      };
+      const payload = { deal_id: deal.id, company_id: lead.company_id, lead_id: lead.id, website_project_id: websiteProject?.id || null, qr_project_id: qrProject?.id || null, type: websiteService ? 'Website' : 'QR', delivery_status: 'not_ready', payment_status: 'pending', approval_status: 'pending', production_status: websiteService ? 'awaiting_intake' : 'not_ready', download_count: 0, responsible_user_id: userId, notes: `Service started. First payment: ${firstAmount} ${service.currency}.` };
       const { data, error } = await db.from('deliveries').insert(payload).select().single();
       if (error) throw new Error(`Could not create delivery: ${error.message}`);
       deliveryRow = data;
