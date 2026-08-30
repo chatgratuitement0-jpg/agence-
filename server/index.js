@@ -13,7 +13,7 @@ const json=(res,status,body)=>{res.writeHead(status,{'content-type':'application
 const readBody=req=>new Promise((resolve,reject)=>{let s='';req.on('data',c=>{s+=c;if(s.length>2_000_000){req.destroy();reject(new Error('Payload too large'));}});req.on('end',()=>resolve(s));req.on('error',reject);});
 const rawPath=req=>String(req.url||'').split('?')[0];
 const server=http.createServer(async(req,res)=>{try{
-  if(req.method==='GET'&&req.url==='/health'){return json(res,200,{ok:true,service:'secure-server-layer',configured:isServerConfigured(),providers:{ai:await providers.ai.health(),whatsapp:await providers.whatsapp.health(),sms:await providers.sms.health()}})}
+  if(req.method==='GET'&&rawPath(req)==='/health'){return json(res,200,{ok:true,service:'secure-server-layer',configured:isServerConfigured(),providers:{ai:await providers.ai.health(),whatsapp:await providers.whatsapp.health(),sms:await providers.sms.health()}})}
   if(rawPath(req)==='/webhooks/whatsapp'){
     if(!integrationLimiters.webhook.allow(req.socket.remoteAddress||'unknown'))return json(res,429,{error:'Webhook rate limit exceeded'});
     if(req.method==='GET'){
@@ -43,5 +43,5 @@ const server=http.createServer(async(req,res)=>{try{
   }
   return json(res,404,{error:'Not found'});
 }catch(e){console.error('server error',e.message);return json(res,500,{error:'Internal server error'})}});
-if(process.env.START_SERVER==='true')server.listen(serverConfig.port,'127.0.0.1',()=>console.log(`Secure server layer listening on 127.0.0.1:${serverConfig.port}`));
+if(process.env.START_SERVER==='true')server.listen(serverConfig.port,process.env.HOST||'0.0.0.0',()=>console.log(`Secure server layer listening on ${process.env.HOST||'0.0.0.0'}:${serverConfig.port}`));
 export {server};
