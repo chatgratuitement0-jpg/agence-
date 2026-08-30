@@ -28,19 +28,34 @@ function makeZip(files) {
   return Buffer.concat([...local, ...central, Buffer.from('PK\x05\x06', 'binary'), Buffer.alloc(2), Buffer.alloc(2), u16(files.length), u16(files.length), u32(centralSize), u32(offset), u16(0)]);
 }
 
-async function assertOwner(db, projectId, userId) {
+async function assertOwner(db, projectId, userId, userRole = 'sales') {
   const { data, error } = await db.from('website_projects').select('id,lead_id,company_id,deal_id,status,rendered_html,client_approved_at,first_payment_at,package_generated_at,delivered_at,delivery_status,package_path,final_zip_generated_at,final_zip_size,final_zip_sha256').eq('id', projectId).single();
   if (error || !data) throw new Error('Website project not found');
+
+  // Admins and managers can operate on any website project.
+  if (userRole === 'admin' || userRole === 'manager') return data;
+
+  // Sales users must have an explicit ownership path. Never grant access
+  // merely because a project ID is known, especially when lead_id is null.
+  let ownerId = null;
   if (data.lead_id) {
     const { data: lead } = await db.from('leads').select('owner_id').eq('id', data.lead_id).single();
-    if (!lead || lead.owner_id !== userId) throw new Error('Not authorized');
+    ownerId = lead?.owner_id || null;
+  } else if (data.deal_id) {
+    const { data: deal } = await db.from('deals').select('lead_id').eq('id', data.deal_id).single();
+    if (deal?.lead_id) {
+      const { data: lead } = await db.from('leads').select('owner_id').eq('id', deal.lead_id).single();
+      ownerId = lead?.owner_id || null;
+    }
   }
+
+  if (!ownerId || ownerId !== userId) throw new Error('Not authorized');
   return data;
 }
 
-export async function approveWebsitePreview({ projectId, userId }) {
+export async function approveWebsitePreview({ projectId, userId, userRole = 'sales' }) {
   const db = getAdminDb();
-  const project = await assertOwner(db, projectId, userId);
+  const project = await assertOwner(db, projectId, userId, userRole);
   if (!project.rendered_html) throw new Error('Preview is not ready');
   const now = new Date().toISOString();
   const { data, error } = await db.from('website_projects').update({ client_approved_at: now, status: project.first_payment_at ? 'approved' : 'awaiting_first_payment', delivery_status: project.first_payment_at ? 'ready_for_package' : 'awaiting_first_payment', notes: project.first_payment_at ? 'Client approved preview. Final package can be generated.' : 'Client approved preview. Waiting for first payment.' }).eq('id', projectId).select().single();
@@ -48,9 +63,9 @@ export async function approveWebsitePreview({ projectId, userId }) {
   return data;
 }
 
-export async function registerFirstPayment({ projectId, paymentId, userId }) {
+export async function registerFirstPayment({ projectId, paymentId, userId, userRole = 'sales' }) {
   const db = getAdminDb();
-  const project = await assertOwner(db, projectId, userId);
+  const project = await assertOwner(db, projectId, userId, userRole);
   if (!project.client_approved_at) throw new Error('Client approval is required before first payment is registered');
   const { data: payment, error: paymentError } = await db.from('payments').select('id,status,paid_at,milestone_type,website_project_id,deal_id').eq('id', paymentId).single();
   if (paymentError || !payment) throw new Error('Payment not found');
@@ -62,9 +77,9 @@ export async function registerFirstPayment({ projectId, paymentId, userId }) {
   return data;
 }
 
-export async function generateFinalWebsitePackage({ projectId, userId }) {
+export async function generateFinalWebsitePackage({ projectId, userId, userRole = 'sales' }) {
   const db = getAdminDb();
-  const project = await assertOwner(db, projectId, userId);
+  const project = await assertOwner(db, projectId, userId, userRole);
   if (!project.client_approved_at) throw new Error('Client approval required');
   if (!project.first_payment_at) throw new Error('First payment required before final package generation');
   if (!project.rendered_html) throw new Error('Website preview has not been generated');
@@ -96,9 +111,9 @@ export async function generateFinalWebsitePackage({ projectId, userId }) {
   return { project: data, filename, sha256, size: zip.length, delivery: storage, reused: false };
 }
 
-export async function downloadFinalWebsitePackage({ projectId, userId }) {
+export async function downloadFinalWebsitePackage({ projectId, userId, userRole = 'sales' }) {
   const db = getAdminDb();
-  const project = await assertOwner(db, projectId, userId);
+  const project = await assertOwner(db, projectId, userId, userRole);
   if (!project.client_approved_at) throw new Error('Client approval required');
   if (!project.first_payment_at) throw new Error('First payment required before package download');
   if (!project.package_path) throw new Error('Final package has not been generated');
