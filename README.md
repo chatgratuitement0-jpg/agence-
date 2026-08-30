@@ -1,6 +1,6 @@
 # AI Agency CRM
 
-## Final Version — Phase 1 → Phase 11
+## Final Version — Phase 1 → Phase 12
 
 AI Agency CRM is a cumulative agency operating system built phase-by-phase without replacing the underlying architecture. The final project connects the operational flow from prospecting and qualification through AI-assisted sales, outreach, deals, payments, website/QR production, client review and secure delivery.
 
@@ -51,7 +51,8 @@ Sensitive provider credentials never belong in frontend code, `VITE_*`, localSto
 ## Main Modules
 
 - Dashboard — final operational metrics backed by Supabase.
-- Discovery — company signals using the existing Lead Intelligence engine.
+- Discovery — company signals using Google Places when configured.
+- Prospecting Pipeline — owned searches, candidate capture, AI analysis, qualification and human-approved outreach tasks.
 - Companies — CRM company records.
 - Leads — qualification, scoring, status and intelligence.
 - Outreach — campaigns, templates, messages and follow-ups.
@@ -79,6 +80,22 @@ Phase 8 introduced real server-side AI provider support while preserving the Pha
 - Confidence thresholds and Human Handoff remain active.
 - AI usage is recorded in `ai_usage_logs` when available.
 - Provider-unavailable operation falls back to the deterministic-safe engine; an unavailable provider is never presented as connected.
+
+## Prospecting
+
+The prospecting pipeline is server-side and ownership-aware:
+
+```text
+Search → Google Places Discovery → Candidates → AI Analysis → Qualification
+                                      ↓
+                              Score / Priority
+                                      ↓
+                           Outreach Draft → Human Approval
+                                      ↓
+                             Service Start Approval
+```
+
+Searches and candidates are scoped to their creator/owner. Sales users can only access tasks for their own leads; admin and manager roles can operate across the team. Outreach is never sent automatically by the prospecting pipeline; it remains a human-approved task.
 
 ## Outreach / Email
 
@@ -218,92 +235,10 @@ INTEGRATION_MAX_RETRIES=3
 AI_TIMEOUT_MS=30000
 EMAIL_TIMEOUT_MS=30000
 AI_MAX_REQUESTS_PER_MINUTE=30
-EMAIL_MAX_REQUESTS_PER_MINUTE=20
-MAX_AUTOMATED_ACTIONS=20
 ```
 
-The example file contains placeholders only. Never commit real credentials.
+## Validation
 
-## Database
+The repository CI runs syntax checks, the complete Phase 8–12 test suite, Vite build and GitHub Pages deployment on every push to `main`.
 
-Migrations are cumulative and must be applied in timestamp order from Phase 2 through Phase 11.
-
-Phase migrations:
-
-- `20260828170000_phase_2_crm_foundation.sql`
-- `20260828183000_phase_3_core_crm.sql`
-- `20260828210000_phase_4_website_production.sql`
-- `20260828215900_phase_5_enum_extensions.sql`
-- `20260828220000_phase_5_communication_outreach.sql`
-- `20260828221000_phase_6_ai_agent_automation.sql`
-- `20260828223000_phase_7_secure_integrations.sql`
-- `20260828230000_phase_8_real_integrations.sql`
-- `20260828240000_phase_9_website_qr_production.sql`
-- `20260828250000_phase_10_payments_billing_delivery.sql`
-- `20260828260000_phase_11_final_audit.sql`
-
-`supabase/schema.sql` is kept synchronized with the cumulative database definition.
-
-## Local Development
-
-1. Copy `.env.example` to `.env.local`.
-2. Configure `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` for the browser.
-3. Apply the Supabase migrations in order.
-4. Configure server-only credentials only when the corresponding provider is actually available.
-5. Install dependencies:
-
-```bash
-npm install
-```
-
-6. Run the frontend:
-
-```bash
-npm run dev
-```
-
-7. Run the secure server separately when required:
-
-```bash
-npm run server
-```
-
-## Testing
-
-Available commands:
-
-```bash
-npm run check
-npm test
-npm run test:phase8
-npm run test:phase9
-npm run test:phase10
-npm run test:phase11
-npm run build
-```
-
-The phase tests include deterministic/static checks for provider security, QR generation, payment calculations, delivery gates, database structures and final integration references.
-
-A real Supabase RLS/migration test, external AI call, real email send, webhook from a public provider and production deployment are only considered successful when executed against a configured environment.
-
-## Production Readiness Notes
-
-The repository is structured for a real installation, but repository-level verification cannot substitute for deployment verification. Before production activation, configure Supabase, apply migrations, verify RLS with real users/roles, configure provider credentials in the server environment, execute provider connection tests, and run an authenticated browser smoke test.
-
-The current repository does not contain real provider credentials.
-
-## Git History
-
-The project keeps the cumulative phase history. Phase 11 is a final integration/audit hardening phase rather than a replacement architecture.
-
-Final phase commit:
-
-```text
-feat: finalize ai agency crm production readiness
-```
-
-## Final Scope
-
-**AI Agency CRM — Final Version — Phase 1 → Phase 11**
-
-No Phase 12 is part of this project.
+External providers remain optional configuration: the core CRM can be built and deployed without exposing provider secrets to the browser. Provider-specific operations return an explicit `not_configured` state when credentials are absent.
