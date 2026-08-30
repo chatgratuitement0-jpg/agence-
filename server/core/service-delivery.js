@@ -94,11 +94,11 @@ export async function startApprovedService({ taskId, userId }) {
         company_id: lead.company_id,
         service_id: service.id,
         deal_id: deal.id,
-        status: 'awaiting_first_payment',
+        status: 'payment_pending',
         business_data: { lead_name: lead.name, service_name: service.name },
         project_data: {},
-        delivery_status: 'payment_required',
-        notes: 'Preview may be prepared after intake; final package remains gated by first payment.'
+        delivery_status: 'not_ready',
+        notes: 'Service started. First payment is required before final package delivery.'
       }).select().single();
       if (error) throw new Error(`Could not create website project: ${error.message}`);
       websiteProject = data;
