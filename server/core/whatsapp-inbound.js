@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { getAdminDb } from './db.js';
 import { OpenAIProvider } from '../providers/openai.js';
+import { handleSalesConversation } from './whatsapp-reply-agent.js';
 
 const ai = new OpenAIProvider();
 
@@ -123,6 +124,24 @@ export async function processWhatsAppInbound({ rawBody, userAgent = '' }) {
           payload: { incoming_message: text, channel: 'whatsapp', user_agent: userAgent },
           result: decision.data
         });
+
+        // If the AI can handle the conversation, continue automatically.
+        // If it requests a human, the conversation remains in handoff state.
+        if (!decision.data.needs_human) {
+          try {
+            await handleSalesConversation({ leadId: lead.id, userId: lead.owner_id });
+          } catch (replyError) {
+            await db.from('sales_agent_tasks').insert({
+              lead_id: lead.id,
+              task_type: 'handoff',
+              status: 'waiting_approval',
+              requires_human: true,
+              payload: { reason: replyError.message, channel: 'whatsapp', incoming_message: text },
+              result: { error: replyError.message }
+            });
+            await db.from('conversations').update({ status: 'human_required' }).eq('id', conversation.id);
+          }
+        }
 
         processed += 1;
       }
