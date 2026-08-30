@@ -4,6 +4,39 @@ import { startApprovedService } from './service-delivery.js';
 
 const TASK_TYPES = new Set(['analyze','draft_outreach','send_outreach','follow_up','negotiate','handoff','start_service','review_service']);
 const APPROVABLE = new Set(['send_outreach','start_service','review_service']);
+const MANAGER_ROLES = new Set(['admin', 'manager']);
+
+async function assertSearchOwner(db, searchId, userId) {
+  const { data, error } = await db.from('prospecting_searches').select('id,created_by').eq('id', searchId).eq('created_by', userId).single();
+  if (error || !data) {
+    const e = new Error('Prospecting search not found');
+    e.status = 404;
+    throw e;
+  }
+  return data;
+}
+
+async function assertLeadAccess(db, leadId, user) {
+  const { data: lead, error } = await db.from('leads').select('id,owner_id').eq('id', leadId).single();
+  if (error || !lead) {
+    const e = new Error('Lead not found');
+    e.status = 404;
+    throw e;
+  }
+  if (!MANAGER_ROLES.has(user.role) && lead.owner_id !== user.id) {
+    const e = new Error('Not authorized');
+    e.status = 403;
+    throw e;
+  }
+  return lead;
+}
+
+async function assertTaskAccess(db, taskId, user) {
+  const { data: task, error } = await db.from('sales_agent_tasks').select('*').eq('id', taskId).single();
+  if (error || !task) return null;
+  await assertLeadAccess(db, task.lead_id, user);
+  return task;
+}
 
 export async function handleProspectingApi({ path, method, body, user }) {
   requireRole(user);
@@ -26,6 +59,11 @@ export async function handleProspectingApi({ path, method, body, user }) {
   if (path === '/api/prospecting/candidates' && method === 'POST') {
     const searchId = body?.search_id;
     if (!searchId || !Array.isArray(body?.candidates)) return { status: 400, body: { error: 'search_id and candidates[] are required' } };
+    try {
+      await assertSearchOwner(db, searchId, user.id);
+    } catch (e) {
+      return { status: e.status || 403, body: { error: e.message } };
+    }
     const rows = body.candidates.filter(c => c?.company_name).map(c => ({ search_id: searchId, company_name: String(c.company_name).trim(), website_url: c.website_url || null, contact_phone: c.contact_phone || null, source: c.source || null, source_url: c.source_url || null, score: Number.isFinite(Number(c.score)) ? Number(c.score) : null, analysis: c.analysis && typeof c.analysis === 'object' ? c.analysis : {}, status: c.analysis ? 'analyzed' : 'new' }));
     if (!rows.length) return { status: 400, body: { error: 'At least one valid candidate is required' } };
     const { data, error } = await db.from('prospect_candidates').insert(rows).select();
@@ -38,6 +76,11 @@ export async function handleProspectingApi({ path, method, body, user }) {
     const leadId = body?.lead_id;
     const taskType = body?.task_type;
     if (!leadId || !TASK_TYPES.has(taskType)) return { status: 400, body: { error: 'lead_id and a valid task_type are required' } };
+    try {
+      await assertLeadAccess(db, leadId, user);
+    } catch (e) {
+      return { status: e.status || 403, body: { error: e.message } };
+    }
     const waiting = Boolean(body.requires_human) || APPROVABLE.has(taskType);
     const { data, error } = await db.from('sales_agent_tasks').insert({ lead_id: leadId, task_type: taskType, status: waiting ? 'waiting_approval' : 'pending', requires_human: waiting, payload: body.payload && typeof body.payload === 'object' ? body.payload : {} }).select().single();
     if (error) return { status: 500, body: { error: 'Could not create sales agent task' } };
@@ -45,7 +88,15 @@ export async function handleProspectingApi({ path, method, body, user }) {
   }
 
   if (path === '/api/prospecting/tasks' && method === 'GET') {
-    const { data, error } = await db.from('sales_agent_tasks').select('id,lead_id,task_type,status,requires_human,payload,result,scheduled_at,completed_at,created_at').order('created_at', { ascending: false }).limit(100);
+    let query = db.from('sales_agent_tasks').select('id,lead_id,task_type,status,requires_human,payload,result,scheduled_at,completed_at,created_at').order('created_at', { ascending: false }).limit(100);
+    if (!MANAGER_ROLES.has(user.role)) {
+      const { data: ownedLeads, error: leadError } = await db.from('leads').select('id').eq('owner_id', user.id);
+      if (leadError) return { status: 500, body: { error: 'Could not load owned leads' } };
+      const leadIds = (ownedLeads || []).map(row => row.id);
+      if (!leadIds.length) return { status: 200, body: { tasks: [] } };
+      query = query.in('lead_id', leadIds);
+    }
+    const { data, error } = await query;
     if (error) return { status: 500, body: { error: 'Could not load sales agent tasks' } };
     return { status: 200, body: { tasks: data || [] } };
   }
@@ -54,8 +105,13 @@ export async function handleProspectingApi({ path, method, body, user }) {
   if (approvalMatch && method === 'POST') {
     const taskId = approvalMatch[1];
     const action = approvalMatch[2];
-    const { data: task, error } = await db.from('sales_agent_tasks').select('*').eq('id', taskId).single();
-    if (error || !task) return { status: 404, body: { error: 'Task not found' } };
+    let task;
+    try {
+      task = await assertTaskAccess(db, taskId, user);
+    } catch (e) {
+      return { status: e.status || 403, body: { error: e.message } };
+    }
+    if (!task) return { status: 404, body: { error: 'Task not found' } };
     if (!task.requires_human || task.status !== 'waiting_approval') return { status: 409, body: { error: 'Task is not awaiting approval' } };
 
     if (action === 'reject') {
