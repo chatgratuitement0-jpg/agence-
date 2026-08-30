@@ -1,5 +1,6 @@
 import { getAdminDb, requireRole } from './db.js';
 import { runDiscoverySearch } from './discovery-agent.js';
+import { startApprovedService } from './service-delivery.js';
 
 const TASK_TYPES = new Set(['analyze','draft_outreach','send_outreach','follow_up','negotiate','handoff','start_service','review_service']);
 const APPROVABLE = new Set(['send_outreach','start_service','review_service']);
@@ -63,19 +64,35 @@ export async function handleProspectingApi({ path, method, body, user }) {
       return { status: 200, body: { task: updated, action: 'rejected' } };
     }
 
-    const nextStatus = task.task_type === 'send_outreach' ? 'completed' : 'pending';
-    const nextTask = task.task_type === 'start_service' ? { lead_id: task.lead_id, task_type: 'review_service', status: 'waiting_approval', requires_human: true, payload: { parent_task_id: task.id, source: 'approved_start_service', ...(task.payload || {}) } } : null;
+    if (task.task_type === 'start_service') {
+      try {
+        const delivery = await startApprovedService({ taskId, userId: user.id });
+        const { data: updated } = await db.from('sales_agent_tasks').select('*').eq('id', taskId).single();
+        const { data: reviewTask, error: reviewError } = await db.from('sales_agent_tasks').insert({
+          lead_id: task.lead_id,
+          task_type: 'review_service',
+          status: 'waiting_approval',
+          requires_human: true,
+          payload: {
+            parent_task_id: task.id,
+            source: 'approved_start_service',
+            deal_id: delivery.deal.id,
+            website_project_id: delivery.websiteProject?.id || null,
+            delivery_id: delivery.delivery.id
+          }
+        }).select().single();
+        if (reviewError) return { status: 500, body: { error: 'Service started, but review task could not be created' } };
+        return { status: 200, body: { task: updated, next_task: reviewTask, delivery, action: 'service_started' } };
+      } catch (serviceError) {
+        return { status: 422, body: { error: serviceError.message } };
+      }
+    }
 
+    const nextStatus = task.task_type === 'send_outreach' ? 'completed' : 'pending';
     const { data: updated, error: updateError } = await db.from('sales_agent_tasks').update({ status: nextStatus, requires_human: false, result: { ...task.result, decision: 'approved', approved_by: user.id, approved_at: new Date().toISOString() }, completed_at: nextStatus === 'completed' ? new Date().toISOString() : null }).eq('id', taskId).select().single();
     if (updateError) return { status: 500, body: { error: 'Could not approve task' } };
 
-    let createdTask = null;
-    if (nextTask) {
-      const { data, error: nextError } = await db.from('sales_agent_tasks').insert(nextTask).select().single();
-      if (nextError) return { status: 500, body: { error: 'Approved, but could not create service review task' } };
-      createdTask = data;
-    }
-    return { status: 200, body: { task: updated, next_task: createdTask, action: 'approved' } };
+    return { status: 200, body: { task: updated, next_task: null, action: 'approved' } };
   }
 
   return null;
