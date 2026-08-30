@@ -16,25 +16,36 @@ async function getProjectForClient(db, projectId, token) {
   return project;
 }
 
-export async function generateWebsitePreview({ projectId, userId }) {
+async function assertGenerationOwner(db, project, userId, userRole) {
+  if (userRole === 'admin' || userRole === 'manager') return;
+  let ownerId = null;
+  if (project.leads?.owner_id) ownerId = project.leads.owner_id;
+  else if (project.lead_id) {
+    const { data: lead } = await db.from('leads').select('owner_id').eq('id', project.lead_id).single();
+    ownerId = lead?.owner_id || null;
+  } else if (project.deal_id) {
+    const { data: deal } = await db.from('deals').select('lead_id').eq('id', project.deal_id).single();
+    if (deal?.lead_id) {
+      const { data: lead } = await db.from('leads').select('owner_id').eq('id', deal.lead_id).single();
+      ownerId = lead?.owner_id || null;
+    }
+  }
+  if (!ownerId || ownerId !== userId) throw new Error('Not authorized');
+}
+
+export async function generateWebsitePreview({ projectId, userId, userRole = 'sales' }) {
   const db = getAdminDb();
   const { data: project, error } = await db.from('website_projects').select('*,companies(id,name,industry,city,website,email,phone),leads(id,name,owner_id,recommended_service,notes)').eq('id', projectId).single();
   if (error || !project) throw new Error('Website project not found');
-  if (project.leads?.owner_id && project.leads.owner_id !== userId) throw new Error('Not authorized');
+  await assertGenerationOwner(db, project, userId, userRole);
 
-  const context = {
-    project: { id: project.id, status: project.status, business_data: project.business_data, project_data: project.project_data },
-    company: project.companies || null,
-    lead: project.leads || null
-  };
-
+  const context = { project: { id: project.id, status: project.status, business_data: project.business_data, project_data: project.project_data }, company: project.companies || null, lead: project.leads || null };
   const { error: generatingError } = await db.from('website_projects').update({ status: 'generating', delivery_status: 'not_ready' }).eq('id', project.id);
   if (generatingError) throw new Error(generatingError.message);
 
   let generated;
-  try {
-    generated = await providers.ai.generateWebsite(context);
-  } catch (e) {
+  try { generated = await providers.ai.generateWebsite(context); }
+  catch (e) {
     await db.from('website_projects').update({ status: 'pending', delivery_status: 'failed', delivery_notes: `Website generation failed: ${e.message}` }).eq('id', project.id);
     throw e;
   }
@@ -43,17 +54,7 @@ export async function generateWebsitePreview({ projectId, userId }) {
   const expiresAt = new Date(Date.now() + PREVIEW_TTL_HOURS * 60 * 60 * 1000).toISOString();
   const base = previewBaseUrl();
   const previewUrl = base ? `${base}/preview/${project.id}?token=${token}` : `/preview/${project.id}?token=${token}`;
-
-  const { data: updated, error: updateError } = await db.from('website_projects').update({
-    status: 'preview_ready',
-    rendered_html: generated.text,
-    preview_url: previewUrl,
-    preview_token_hash: hashToken(token),
-    preview_expires_at: expiresAt,
-    last_generation_at: new Date().toISOString(),
-    delivery_status: 'not_ready',
-    delivery_notes: 'Preview generated. Final package remains gated by client approval and first payment.'
-  }).eq('id', project.id).select().single();
+  const { data: updated, error: updateError } = await db.from('website_projects').update({ status: 'preview_ready', rendered_html: generated.text, preview_url: previewUrl, preview_token_hash: hashToken(token), preview_expires_at: expiresAt, last_generation_at: new Date().toISOString(), delivery_status: 'not_ready', delivery_notes: 'Preview generated. Final package remains gated by client approval and first payment.' }).eq('id', project.id).select().single();
   if (updateError) throw new Error(updateError.message);
   return { project: updated, preview_url: previewUrl, expires_at: expiresAt, usage: generated.usage || {} };
 }
@@ -72,33 +73,15 @@ export async function reviewWebsitePreview({ projectId, token, decision, message
   if (!['approved', 'changes_requested'].includes(decision)) throw new Error('Invalid review decision');
 
   if (decision === 'approved') {
-    const { data, error } = await db.from('website_projects').update({
-      status: 'approved_final',
-      client_approved_at: project.client_approved_at || new Date().toISOString(),
-      delivery_status: 'not_ready',
-      delivery_notes: 'Client approved preview. Final package is gated by first payment.'
-    }).eq('id', project.id).select('id,status,client_approved_at,delivery_status').single();
+    const { data, error } = await db.from('website_projects').update({ status: 'approved_final', client_approved_at: project.client_approved_at || new Date().toISOString(), delivery_status: 'not_ready', delivery_notes: 'Client approved preview. Final package is gated by first payment.' }).eq('id', project.id).select('id,status,client_approved_at,delivery_status').single();
     if (error) throw new Error(error.message);
     return { decision, project: data, next_step: 'first_payment' };
   }
 
   if (!message?.trim()) throw new Error('A change request message is required');
-  const { error: revisionError } = await db.from('website_revision_requests').insert({
-    website_project_id: project.id,
-    lead_id: project.lead_id,
-    company_id: project.company_id,
-    message: message.trim().slice(0, 5000),
-    requested_by: 'client',
-    status: 'requested',
-    context: { source: 'client_preview' }
-  });
+  const { error: revisionError } = await db.from('website_revision_requests').insert({ website_project_id: project.id, lead_id: project.lead_id, company_id: project.company_id, message: message.trim().slice(0, 5000), requested_by: 'client', status: 'requested', context: { source: 'client_preview' } });
   if (revisionError) throw new Error(revisionError.message);
-
-  const { data, error } = await db.from('website_projects').update({
-    status: 'revision_requested',
-    delivery_status: 'not_ready',
-    delivery_notes: 'Client requested changes to the preview.'
-  }).eq('id', project.id).select('id,status,delivery_status').single();
+  const { data, error } = await db.from('website_projects').update({ status: 'revision_requested', delivery_status: 'not_ready', delivery_notes: 'Client requested changes to the preview.' }).eq('id', project.id).select('id,status,delivery_status').single();
   if (error) throw new Error(error.message);
   return { decision, project: data, next_step: 'revision' };
 }
