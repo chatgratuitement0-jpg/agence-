@@ -34,5 +34,5 @@ assert.match(read('.env.example'),/VITE_SUPABASE_URL=/);
 assert.match(read('.env.example'),/OPENAI_API_KEY=/);
 assert.match(read('.env.example'),/RESEND_API_KEY=|EMAIL_PROVIDER_SECRET=/);
 assert.doesNotMatch(read('.env.example'),/VITE_(?!SUPABASE_ANON_KEY$).*?(?:SECRET|TOKEN|PRIVATE|SERVICE_ROLE).*=/im);
-assert.match(read('README.md'),/Phase 1 → Phase 11/);
+assert.match(read('README.md'),/Phase 1 → Phase 12/);
 console.log('Phase 11 tests passed: final integration references, dashboard/search coverage, payment/invoice security guards, delivery functions, RLS/static secret checks.');
