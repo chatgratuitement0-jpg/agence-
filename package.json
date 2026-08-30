@@ -7,13 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "for f in js/*.js server/**/*.js server/*.js; do node --check \"$f\" || exit 1; done",
+    "check": "find js server -type f -name '*.js' -print0 | xargs -0 -n1 node --check",
     "server": "START_SERVER=true node server/index.js",
     "test:phase8": "node tests/phase8.test.js",
     "test:phase9": "node tests/phase9.test.js",
     "test:phase10": "node tests/phase10.test.js",
-    "test": "npm run test:phase8 && npm run test:phase9 && npm run test:phase10 && npm run test:phase11",
-    "test:phase11": "node tests/phase11.test.js"
+    "test:phase11": "node tests/phase11.test.js",
+    "test:phase12": "node tests/phase12.test.js",
+    "test": "npm run check && npm run test:phase8 && npm run test:phase9 && npm run test:phase10 && npm run test:phase11 && npm run test:phase12"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
