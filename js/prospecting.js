@@ -1,5 +1,5 @@
 import { supabaseClient } from './db.js';
-import { getCurrentUser, getCurrentSession } from './auth.js';
+import { getCurrentUser } from './auth.js';
 import { toast, loading, emptyState, modal } from './ui.js';
 import { escapeHtml, qs, qsa } from './utils.js';
 import { recordActivity } from './activity.js';
@@ -19,8 +19,6 @@ async function apiSearch({ query, targetIndustry, targetCity }) {
   const user = await getCurrentUser();
   if (!user?.id) throw new Error('Authentication required.');
 
-  // Internal CRM test mode: create the search and candidates directly in Supabase.
-  // This intentionally avoids external Google/AI providers until integrations are enabled.
   const { data: search, error: searchError } = await db()
     .from('prospecting_searches')
     .insert({
@@ -69,66 +67,296 @@ async function apiSearch({ query, targetIndustry, targetCity }) {
   return search;
 }
 
+function normalizeName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+async function findExistingCompany({ company_name, website_url, contact_phone }) {
+  const database = db();
+
+  if (website_url) {
+    const { data, error } = await database
+      .from('companies')
+      .select('*')
+      .eq('website', website_url)
+      .is('archived_at', null)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return data;
+  }
+
+  if (contact_phone) {
+    const { data, error } = await database
+      .from('companies')
+      .select('*')
+      .eq('phone', contact_phone)
+      .is('archived_at', null)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return data;
+  }
+
+  const { data, error } = await database
+    .from('companies')
+    .select('*')
+    .is('archived_at', null)
+    .limit(500);
+  if (error) throw error;
+
+  const wanted = normalizeName(company_name);
+  return (data || []).find(c => normalizeName(c.name) === wanted) || null;
+}
+
 async function importCandidates(searchId, raw) {
-  const rows = String(raw || '').split(/\n+/).map(x => x.trim()).filter(Boolean).map(line => {
-    const [company_name, website_url, contact_phone, source_url] = line.split('|').map(x => x.trim());
-    return company_name ? { search_id: searchId, company_name, website_url: website_url || null, contact_phone: contact_phone || null, source_url: source_url || null, source: 'manual_import', status: 'new' } : null;
-  }).filter(Boolean);
+  const rows = String(raw || '')
+    .split(/\n+/)
+    .map(x => x.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [company_name, website_url, contact_phone, source_url] = line.split('|').map(x => x.trim());
+      return company_name
+        ? { company_name, website_url: website_url || null, contact_phone: contact_phone || null, source_url: source_url || null }
+        : null;
+    })
+    .filter(Boolean);
+
   if (!rows.length) throw new Error('Add at least one company.');
-  const r = await db().from('prospect_candidates').insert(rows).select();
-  if (r.error) throw r.error;
-  return r.data || [];
+
+  const imported = [];
+
+  for (const row of rows) {
+    const existing = await findExistingCompany(row);
+    let company = existing;
+
+    if (!company) {
+      const { data, error } = await db()
+        .from('companies')
+        .insert({
+          name: row.company_name,
+          website: row.website_url,
+          phone: row.contact_phone,
+          source: row.source_url || 'manual_import'
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      company = data;
+    } else {
+      const updates = {};
+      if (!company.website && row.website_url) updates.website = row.website_url;
+      if (!company.phone && row.contact_phone) updates.phone = row.contact_phone;
+      if (!company.source && row.source_url) updates.source = row.source_url;
+
+      if (Object.keys(updates).length) {
+        const { data, error } = await db().from('companies').update(updates).eq('id', company.id).select().single();
+        if (error) throw error;
+        company = data;
+      }
+    }
+
+    const { data: candidates, error: candidateError } = await db()
+      .from('prospect_candidates')
+      .select('id,company_name,lead_id')
+      .eq('search_id', searchId);
+    if (candidateError) throw candidateError;
+
+    const wanted = normalizeName(row.company_name);
+    const matches = (candidates || []).filter(c => normalizeName(c.company_name) === wanted);
+
+    if (matches.length) {
+      const { error } = await db()
+        .from('prospect_candidates')
+        .update({ company_id: company.id, updated_at: new Date().toISOString() })
+        .in('id', matches.map(c => c.id));
+      if (error) throw error;
+    }
+
+    await recordActivity({
+      type: existing ? 'company_import_matched' : 'company_created',
+      title: existing ? 'Prospect matched to existing company' : 'Company imported from discovery',
+      company_id: company.id,
+      metadata: { search_id: searchId, company_name: company.name, source: row.source_url || 'manual_import' }
+    });
+
+    imported.push(company);
+  }
+
+  return imported;
 }
 
 async function analyzeCandidate(candidate) {
   const score = candidate.website_url ? 70 : 45;
   const priority = score >= 70 ? 'Hot' : score >= 50 ? 'Warm' : 'Cold';
   const recommended = candidate.website_url ? 'AI Automation' : 'Website';
-  const analysis = { score, priority, opportunities: ['digital presence'], recommended_services: [recommended], summary: `${candidate.company_name} has a potential ${recommended} opportunity.`, next_step: `Prepare a ${recommended} offer.` };
-  const r = await db().from('prospect_candidates').update({ status: 'analyzed', score, analysis, updated_at: new Date().toISOString() }).eq('id', candidate.id).select().single();
+  const analysis = {
+    score,
+    priority,
+    opportunities: ['digital presence'],
+    recommended_services: [recommended],
+    summary: `${candidate.company_name} has a potential ${recommended} opportunity.`,
+    next_step: `Prepare a ${recommended} offer.`
+  };
+
+  const r = await db()
+    .from('prospect_candidates')
+    .update({ status: 'analyzed', score, analysis, updated_at: new Date().toISOString() })
+    .eq('id', candidate.id)
+    .select()
+    .single();
   if (r.error) throw r.error;
-  await db().from('sales_agent_tasks').insert({ lead_id: candidate.lead_id || null, task_type: 'analyze', status: 'completed', requires_human: false, payload: { prospect_candidate_id: candidate.id }, result: analysis, completed_at: new Date().toISOString() });
+
+  const user = await getCurrentUser();
+  if (user?.id) {
+    await recordActivity({
+      type: 'prospect_analyzed',
+      title: 'Prospect analyzed',
+      company_id: candidate.company_id || null,
+      metadata: { prospect_candidate_id: candidate.id, score, recommended_service: recommended }
+    });
+  }
+
   return r.data;
 }
 
 async function prepareOutreach(candidate) {
   const service = (candidate.analysis?.recommended_services || [])[0] || 'digital service';
   const draft = `Bonjour,\n\nJ’ai découvert ${candidate.company_name} et je pense qu’il y a une opportunité intéressante autour de ${service}.\n\nSi vous êtes ouvert à l’idée, je peux vous montrer concrètement ce que je proposerais pour votre activité.\n\nBonne journée.`;
-  const r = await db().from('sales_agent_tasks').insert({ lead_id: candidate.lead_id || null, task_type: 'send_outreach', status: 'waiting_approval', requires_human: true, payload: { prospect_candidate_id: candidate.id, channel: 'whatsapp', draft: { message: draft } } }).select().single();
+  const r = await db().from('sales_agent_tasks').insert({
+    lead_id: candidate.lead_id || null,
+    task_type: 'send_outreach',
+    status: 'waiting_approval',
+    requires_human: true,
+    payload: { prospect_candidate_id: candidate.id, channel: 'whatsapp', draft: { message: draft } }
+  }).select().single();
   if (r.error) throw r.error;
+
   const user = await getCurrentUser();
-  if (user) await db().from('notifications').insert({ user_id: user.id, type: 'prospecting_outreach_ready', title: 'Outreach draft ready', message: `Draft prepared for ${candidate.company_name}. Approval required.`, source_type: 'sales_agent_task', source_id: r.data.id });
+  if (user) {
+    const notification = await db().from('notifications').insert({
+      user_id: user.id,
+      type: 'prospecting_outreach_ready',
+      title: 'Outreach draft ready',
+      body: `Draft prepared for ${candidate.company_name}. Approval required.`,
+      source_type: 'sales_agent_task',
+      source_id: r.data.id
+    });
+    if (notification.error) throw notification.error;
+  }
   return { draft, task: r.data };
 }
 
 function searchModal() {
-  const m = modal({ title: 'New prospecting search', body: `<form id="prospecting-form" class="form-grid"><label>What should the AI find?<input name="query" required placeholder="e.g. restaurants that need a professional website"></label><label>Industry<input name="industry" placeholder="Restaurants"></label><label>City<input name="city" placeholder="Rabat"></label><div class="alert alert-warn full">Internal test mode is active. No external provider or WhatsApp message is used. Candidates will be created in the CRM for workflow testing.</div><div class="form-actions"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary">Find prospects</button></div></form>` });
-  m.querySelector('form').onsubmit = async e => { e.preventDefault(); const b = e.currentTarget.querySelector('.btn-primary'); b.disabled = true; b.textContent = 'Searching…'; try { const fd = new FormData(e.currentTarget); const search = await apiSearch({ query: String(fd.get('query')).trim(), targetIndustry: String(fd.get('industry')).trim(), targetCity: String(fd.get('city')).trim() }); await recordActivity({ type: 'prospecting_search_started', title: 'AI prospecting search started', metadata: { search_id: search.id, mode: 'internal_test' } }); toast('Prospecting search completed', 'success'); m.remove(); render(); } catch (x) { toast(x.message, 'error'); b.disabled = false; b.textContent = 'Find prospects'; } };
+  const m = modal({
+    title: 'New prospecting search',
+    body: `<form id="prospecting-form" class="form-grid"><label>What should the AI find?<input name="query" required placeholder="e.g. restaurants that need a professional website"></label><label>Industry<input name="industry" placeholder="Restaurants"></label><label>City<input name="city" placeholder="Rabat"></label><div class="alert alert-warn full">Internal test mode is active. No external provider or WhatsApp message is used. Candidates will be created in the CRM for workflow testing.</div><div class="form-actions"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary">Find prospects</button></div></form>`
+  });
+
+  m.querySelector('form').onsubmit = async e => {
+    e.preventDefault();
+    const b = e.currentTarget.querySelector('.btn-primary');
+    b.disabled = true;
+    b.textContent = 'Searching…';
+    try {
+      const fd = new FormData(e.currentTarget);
+      const search = await apiSearch({
+        query: String(fd.get('query')).trim(),
+        targetIndustry: String(fd.get('industry')).trim(),
+        targetCity: String(fd.get('city')).trim()
+      });
+      await recordActivity({
+        type: 'prospecting_search_started',
+        title: 'AI prospecting search started',
+        metadata: { search_id: search.id, mode: 'internal_test' }
+      });
+      toast('Prospecting search completed', 'success');
+      m.remove();
+      render();
+    } catch (x) {
+      toast(x.message, 'error');
+      b.disabled = false;
+      b.textContent = 'Find prospects';
+    }
+  };
 }
 
 function importModal(searchId) {
-  const m = modal({ title: 'Import discovered companies', body: `<p class="muted">One company per line: Company | Website | Phone | Source URL</p><textarea id="candidate-input" rows="10" placeholder="Example Business | https://example.com | +212... | https://source.example"></textarea><div class="form-actions"><button class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" id="import-candidates">Import candidates</button></div>` });
-  m.querySelector('#import-candidates').onclick = async () => { const b = m.querySelector('#import-candidates'); b.disabled = true; try { const rows = await importCandidates(searchId, m.querySelector('#candidate-input').value); toast(`${rows.length} candidate(s) imported`, 'success'); m.remove(); render(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } };
+  const m = modal({
+    title: 'Import discovered companies',
+    body: `<p class="muted">One company per line: Company | Website | Phone | Source URL</p><textarea id="candidate-input" rows="10" placeholder="Example Business | https://example.com | +212... | https://source.example"></textarea><div class="alert alert-info">Import creates or matches a Company record and links the discovered prospect to it. Duplicate companies are not created.</div><div class="form-actions"><button class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" id="import-candidates">Import candidates</button></div>`
+  });
+
+  m.querySelector('#import-candidates').onclick = async () => {
+    const b = m.querySelector('#import-candidates');
+    b.disabled = true;
+    b.textContent = 'Importing…';
+    try {
+      const companies = await importCandidates(searchId, m.querySelector('#candidate-input').value);
+      toast(`${companies.length} company record(s) imported or matched`, 'success');
+      m.remove();
+      render();
+    } catch (e) {
+      toast(e.message, 'error');
+      b.disabled = false;
+      b.textContent = 'Import candidates';
+    }
+  };
 }
 
 function candidateCard(c) {
   const a = c.analysis || {};
-  return `<article class="card"><div class="card-head"><div><span class="eyebrow">PROSPECT</span><h3>${esc(c.company_name)}</h3></div><span class="badge">${esc(c.status)}</span></div><p class="muted">${esc(c.website_url || 'No website')} ${c.contact_phone ? ' · ' + esc(c.contact_phone) : ''}</p><div class="lead-kpis"><div><span>Score</span><strong>${c.score == null ? '—' : Number(c.score)}</strong></div><div><span>Priority</span><strong>${esc(a.priority || '—')}</strong></div><div><span>Service</span><strong>${esc((a.recommended_services || [])[0] || '—')}</strong></div></div><p>${esc(a.summary || 'Not analyzed yet.')}</p><div class="project-actions"><button class="btn btn-ghost" data-analyze="${c.id}" ${c.status === 'analyzed' ? 'disabled' : ''}>${c.status === 'analyzed' ? 'Analyzed' : 'Analyze'}</button>${c.status === 'analyzed' ? `<button class="btn btn-primary" data-draft="${c.id}">Prepare outreach</button>` : ''}</div></article>`;
+  const imported = Boolean(c.company_id);
+  return `<article class="card"><div class="card-head"><div><span class="eyebrow">PROSPECT</span><h3>${esc(c.company_name)}</h3></div><span class="badge">${esc(c.status)}</span></div><p class="muted">${esc(c.website_url || 'No website')} ${c.contact_phone ? ' · ' + esc(c.contact_phone) : ''}</p><div class="lead-kpis"><div><span>Score</span><strong>${c.score == null ? '—' : Number(c.score)}</strong></div><div><span>Priority</span><strong>${esc(a.priority || '—')}</strong></div><div><span>Service</span><strong>${esc((a.recommended_services || [])[0] || '—')}</strong></div></div><p>${esc(a.summary || 'Not analyzed yet.')}</p>${imported ? '<p class="badge badge-success">✓ Linked to Company</p>' : ''}<div class="project-actions"><button class="btn btn-ghost" data-analyze="${c.id}" ${c.status === 'analyzed' ? 'disabled' : ''}>${c.status === 'analyzed' ? 'Analyzed' : 'Analyze'}</button>${c.status === 'analyzed' ? `<button class="btn btn-primary" data-draft="${c.id}">Prepare outreach</button>` : ''}</div></article>`;
 }
 
 export async function render() {
-  const host = qs('#page'); host.innerHTML = loading('Loading AI Prospecting…');
+  const host = qs('#page');
+  host.innerHTML = loading('Loading AI Prospecting…');
   try {
     const [searches, candidates] = await Promise.all([
       db().from('prospecting_searches').select('*').order('created_at', { ascending: false }).limit(20),
       db().from('prospect_candidates').select('*').order('created_at', { ascending: false }).limit(50)
     ]);
-    if (searches.error) throw searches.error; if (candidates.error) throw candidates.error;
-    const ss = searches.data || [], cs = candidates.data || [];
+    if (searches.error) throw searches.error;
+    if (candidates.error) throw candidates.error;
+
+    const ss = searches.data || [];
+    const cs = candidates.data || [];
     host.innerHTML = `<div class="module-head"><div><span class="eyebrow">AI SALES / PROSPECTING</span><h2>AI Prospecting</h2><p>Tell the agent what kind of businesses you want. It discovers, analyzes, qualifies and prepares outreach for your approval.</p></div><button class="btn btn-primary" id="new-search">+ Find prospects</button></div><div class="metrics metrics-compact"><article class="metric-card"><span>Searches</span><strong>${ss.length}</strong><small>Database-backed</small></article><article class="metric-card"><span>Prospects</span><strong>${cs.length}</strong><small>Candidate records</small></article><article class="metric-card"><span>Analyzed</span><strong>${cs.filter(x => ['analyzed','approved'].includes(x.status)).length}</strong><small>AI intelligence</small></article><article class="metric-card"><span>Approval queue</span><strong>${cs.filter(x => x.status === 'approved').length}</strong><small>Human approval</small></article></div><section class="card"><div class="card-head"><div><span class="eyebrow">SEARCH QUEUE</span><h3>Prospecting searches</h3></div></div><div class="mini-list">${ss.map(s => `<div class="list-row"><span><b>${esc(s.query)}</b><small>${esc([s.target_industry, s.target_city].filter(Boolean).join(' · ') || 'Any market')}</small></span><em>${esc(s.status)}</em><button class="btn btn-ghost" data-import="${s.id}">Import</button></div>`).join('') || '<p class="muted">No searches yet.</p>'}</div></section><section class="template-grid">${cs.map(candidateCard).join('') || emptyState('No prospects yet', 'Click Find prospects to start an AI discovery search.')}</section>`;
+
     qs('#new-search').onclick = searchModal;
     qsa('[data-import]').forEach(b => b.onclick = () => importModal(b.dataset.import));
-    qsa('[data-analyze]').forEach(b => b.onclick = async () => { b.disabled = true; b.textContent = 'Analyzing…'; try { const r = await db().from('prospect_candidates').select('*').eq('id', b.dataset.analyze).single(); if (r.error) throw r.error; await analyzeCandidate(r.data); toast('Prospect analyzed', 'success'); render(); } catch (e) { toast(e.message, 'error'); b.disabled = false; b.textContent = 'Analyze'; } });
-    qsa('[data-draft]').forEach(b => b.onclick = async () => { try { const r = await db().from('prospect_candidates').select('*').eq('id', b.dataset.draft).single(); if (r.error) throw r.error; const { draft } = await prepareOutreach(r.data); const m = modal({ title: 'Outreach draft — approval required', body: `<div class="alert alert-warn">This message is NOT sent. Approval is required before any external WhatsApp action.</div><textarea id="outreach-draft" rows="10">${esc(draft)}</textarea><div class="form-actions"><button class="btn btn-ghost" data-close>Close</button><button class="btn btn-primary" data-copy>Copy draft</button></div>` }); m.querySelector('[data-copy]').onclick = async () => { await navigator.clipboard.writeText(m.querySelector('#outreach-draft').value); toast('Draft copied', 'success'); }; } catch (e) { toast(e.message, 'error'); } });
-  } catch (e) { host.innerHTML = emptyState('AI Prospecting unavailable', e.message); }
+    qsa('[data-analyze]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      b.textContent = 'Analyzing…';
+      try {
+        const r = await db().from('prospect_candidates').select('*').eq('id', b.dataset.analyze).single();
+        if (r.error) throw r.error;
+        await analyzeCandidate(r.data);
+        toast('Prospect analyzed', 'success');
+        render();
+      } catch (e) {
+        toast(e.message, 'error');
+        b.disabled = false;
+        b.textContent = 'Analyze';
+      }
+    });
+    qsa('[data-draft]').forEach(b => b.onclick = async () => {
+      try {
+        const r = await db().from('prospect_candidates').select('*').eq('id', b.dataset.draft).single();
+        if (r.error) throw r.error;
+        const { draft } = await prepareOutreach(r.data);
+        const m = modal({ title: 'Outreach draft — approval required', body: `<div class="alert alert-warn">This message is NOT sent. Approval is required before any external WhatsApp action.</div><textarea id="outreach-draft" rows="10">${esc(draft)}</textarea><div class="form-actions"><button class="btn btn-ghost" data-close>Close</button><button class="btn btn-primary" data-copy>Copy draft</button></div>` });
+        m.querySelector('[data-copy]').onclick = async () => {
+          await navigator.clipboard.writeText(m.querySelector('#outreach-draft').value);
+          toast('Draft copied', 'success');
+        };
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    });
+  } catch (e) {
+    host.innerHTML = emptyState('AI Prospecting unavailable', e.message);
+  }
 }
