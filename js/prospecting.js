@@ -7,18 +7,66 @@ import { recordActivity } from './activity.js';
 const db = () => supabaseClient();
 const esc = v => escapeHtml(v ?? '');
 
+const INTERNAL_TEST_PROSPECTS = [
+  { company_name: 'Atlas Café Rabat', score: 82, service: 'Google Review QR Code' },
+  { company_name: 'Rabat Garden Restaurant', score: 74, service: 'Vitrine Website' },
+  { company_name: 'Ocean View Café', score: 68, service: 'Professional Website' },
+  { company_name: 'Medina Food House', score: 61, service: 'Vitrine Website' },
+  { company_name: 'Rabat Lounge', score: 55, service: 'Google Review QR Code' }
+];
+
 async function apiSearch({ query, targetIndustry, targetCity }) {
-  const session = await getCurrentSession();
-  const token = session?.data?.session?.access_token;
-  if (!token) throw new Error('Authentication required.');
-  const response = await fetch('/api/prospecting/search', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    body: JSON.stringify({ query, target_industry: targetIndustry || null, target_city: targetCity || null })
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || 'Could not start prospecting search.');
-  return body.search;
+  const user = await getCurrentUser();
+  if (!user?.id) throw new Error('Authentication required.');
+
+  // Internal CRM test mode: create the search and candidates directly in Supabase.
+  // This intentionally avoids external Google/AI providers until integrations are enabled.
+  const { data: search, error: searchError } = await db()
+    .from('prospecting_searches')
+    .insert({
+      created_by: user.id,
+      query: query.trim(),
+      target_city: targetCity || null,
+      target_industry: targetIndustry || null,
+      status: 'running',
+      metadata: { mode: 'internal_test' }
+    })
+    .select()
+    .single();
+
+  if (searchError) throw new Error(searchError.message);
+
+  const candidates = INTERNAL_TEST_PROSPECTS.map(candidate => ({
+    search_id: search.id,
+    company_name: candidate.company_name,
+    website_url: null,
+    contact_phone: null,
+    source: 'internal_test',
+    source_url: null,
+    score: candidate.score,
+    analysis: {
+      priority: candidate.score >= 80 ? 'hot' : candidate.score >= 65 ? 'warm' : 'cold',
+      recommended_services: [candidate.service],
+      address: targetCity || 'Morocco',
+      test_mode: true
+    },
+    status: 'new'
+  }));
+
+  const { error: candidateError } = await db().from('prospect_candidates').insert(candidates);
+  if (candidateError) {
+    await db().from('prospecting_searches').update({ status: 'failed', metadata: { mode: 'internal_test', error: candidateError.message } }).eq('id', search.id);
+    throw new Error(candidateError.message);
+  }
+
+  const { error: completeError } = await db().from('prospecting_searches').update({
+    status: 'completed',
+    completed_at: new Date().toISOString(),
+    metadata: { mode: 'internal_test', provider: 'internal_test', count: candidates.length }
+  }).eq('id', search.id);
+
+  if (completeError) throw new Error(completeError.message);
+  return search;
 }
 
 async function importCandidates(searchId, raw) {
@@ -54,8 +102,8 @@ async function prepareOutreach(candidate) {
 }
 
 function searchModal() {
-  const m = modal({ title: 'New prospecting search', body: `<form id="prospecting-form" class="form-grid"><label>What should the AI find?<input name="query" required placeholder="e.g. restaurants that need a professional website"></label><label>Industry<input name="industry" placeholder="Restaurants"></label><label>City<input name="city" placeholder="Rabat"></label><div class="alert alert-warn full">The agent will start the configured discovery provider. External WhatsApp messages are never sent without your approval.</div><div class="form-actions"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary">Find prospects</button></div></form>` });
-  m.querySelector('form').onsubmit = async e => { e.preventDefault(); const b = e.currentTarget.querySelector('.btn-primary'); b.disabled = true; b.textContent = 'Searching…'; try { const fd = new FormData(e.currentTarget); const search = await apiSearch({ query: String(fd.get('query')).trim(), targetIndustry: String(fd.get('industry')).trim(), targetCity: String(fd.get('city')).trim() }); await recordActivity({ type: 'prospecting_search_started', title: 'AI prospecting search started', metadata: { search_id: search.id } }); toast('Prospecting search started', 'success'); m.remove(); render(); } catch (x) { toast(x.message, 'error'); b.disabled = false; b.textContent = 'Find prospects'; } };
+  const m = modal({ title: 'New prospecting search', body: `<form id="prospecting-form" class="form-grid"><label>What should the AI find?<input name="query" required placeholder="e.g. restaurants that need a professional website"></label><label>Industry<input name="industry" placeholder="Restaurants"></label><label>City<input name="city" placeholder="Rabat"></label><div class="alert alert-warn full">Internal test mode is active. No external provider or WhatsApp message is used. Candidates will be created in the CRM for workflow testing.</div><div class="form-actions"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary">Find prospects</button></div></form>` });
+  m.querySelector('form').onsubmit = async e => { e.preventDefault(); const b = e.currentTarget.querySelector('.btn-primary'); b.disabled = true; b.textContent = 'Searching…'; try { const fd = new FormData(e.currentTarget); const search = await apiSearch({ query: String(fd.get('query')).trim(), targetIndustry: String(fd.get('industry')).trim(), targetCity: String(fd.get('city')).trim() }); await recordActivity({ type: 'prospecting_search_started', title: 'AI prospecting search started', metadata: { search_id: search.id, mode: 'internal_test' } }); toast('Prospecting search completed', 'success'); m.remove(); render(); } catch (x) { toast(x.message, 'error'); b.disabled = false; b.textContent = 'Find prospects'; } };
 }
 
 function importModal(searchId) {
