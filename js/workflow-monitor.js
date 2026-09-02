@@ -1,0 +1,64 @@
+import {supabaseClient} from './db.js';
+import {toast} from './ui.js';
+import {escapeHtml} from './utils.js';
+import {processQueuedWorkflows} from './workflow-worker.js';
+
+const db=()=>supabaseClient();
+let timer=null;
+let busy=false;
+
+const esc=v=>escapeHtml(v??'');
+const fmt=v=>v?new Date(v).toLocaleString():'—';
+const badge=s=>`<span class="badge">${esc(s||'unknown')}</span>`;
+
+async function load(){
+  const host=document.querySelector('#workflow-execution-monitor');
+  if(!host||busy)return;
+  busy=true;
+  try{
+    const {data,error}=await db().from('workflow_execution_monitor').select('*').order('started_at',{ascending:false}).limit(50);
+    if(error)throw error;
+    const rows=data||[];
+    const counts=rows.reduce((a,r)=>{a[r.status]=(a[r.status]||0)+1;return a},{});
+    const stats=['queued','running','completed','failed'].map(s=>`<article class="metric-card"><span>${s}</span><strong>${counts[s]||0}</strong><small>Recent executions</small></article>`).join('');
+    host.innerHTML=`<div class="metrics metrics-compact" style="margin-top:14px">${stats}</div><div class="table-card"><table><thead><tr><th>Workflow</th><th>Status</th><th>Trigger</th><th>Actions</th><th>Started</th><th>Ended</th><th>Error</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.workflow_name)}<small class="muted">${esc(r.mode)}</small></td><td>${badge(r.status)}</td><td>${esc(r.trigger_type)}</td><td>${Number(r.actions_done||0)} / ${Number(r.max_actions||0)}</td><td>${fmt(r.started_at)}</td><td>${fmt(r.ended_at)}</td><td title="${esc(r.error||'')}">${esc(r.error||'—')}</td></tr>`).join('')||`<tr><td colspan="7">No executions yet.</td></tr>`}</tbody></table></div>`;
+  }catch(e){host.innerHTML=`<div class="state"><h3>Execution monitor unavailable</h3><p>${esc(e.message)}</p></div>`}
+  finally{busy=false}
+}
+
+async function process(){
+  const button=document.querySelector('#workflow-process-queue');
+  if(button)button.disabled=true;
+  try{const r=await processQueuedWorkflows({limit:20,silent:true});if(r.error)throw r.error;toast(r.processed?`Processed ${r.processed} workflow execution${r.processed===1?'':'s'}`:'Queue checked','success');await load();}
+  catch(e){toast(e.message||'Queue processing failed','error')}
+  finally{if(button)button.disabled=false}
+}
+
+function mount(){
+  const page=document.querySelector('#page');
+  if(!page)return;
+  const history=page.querySelector('#workflow-executions');
+  if(!history)return;
+  if(!page.querySelector('#workflow-execution-monitor-card')){
+    const card=document.createElement('section');
+    card.id='workflow-execution-monitor-card';
+    card.className='card';
+    card.style.marginTop='14px';
+    card.innerHTML=`<div class="card-head"><div><span class="eyebrow">LIVE MONITOR</span><h3>Execution Monitor</h3><p class="muted">Queue, running, completed and failed workflow executions.</p></div><button class="btn btn-primary" id="workflow-process-queue">Process Queue</button></div><div id="workflow-execution-monitor">Loading…</div>`;
+    page.append(card);
+    card.querySelector('#workflow-process-queue').onclick=process;
+    load();
+  }
+}
+
+const observer=new MutationObserver(mount);
+function start(){
+  const page=document.querySelector('#page');
+  if(!page)return;
+  observer.observe(page,{childList:true,subtree:true});
+  mount();
+}
+start();
+window.addEventListener('workflow-page-refresh',load);
+if(timer)clearInterval(timer);
+timer=setInterval(()=>{if(document.querySelector('#workflow-execution-monitor'))load()},5000);
